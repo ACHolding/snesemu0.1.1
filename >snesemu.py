@@ -9,7 +9,7 @@ there is no external `import snes9x` / out-of-tree .so. Cython directives above
 compile the same source when built as an extension; pure Python still runs.
 
   • All 256 official 65C816 opcodes via an in-file jump table
-  • files=OFF by default (Load ROM UI locked; CLI ROM path still works)
+  • files=ON by default (File → Load ROM, Ctrl+O, argv, macOS drag/open)
   • LoROM/HiROM/ExHiROM, DSP/Cx4 stubs, Mode 7, color math, HDMA, APU ports
 
   python3 snesemu0.1.1.py [--no-sound] [game.sfc]
@@ -120,6 +120,13 @@ _CHIP_NAMES = {
     0xF6: "rom+dsp4",  # Top Gear 3000-ish
 }
 
+# Accepted dump extensions (.sfc .smc .fig .swc — user-supplied, legally owned)
+_ROM_EXTENSIONS = (".sfc", ".smc", ".fig", ".swc", ".SFC", ".SMC", ".FIG", ".SWC")
+_ROM_FILETYPES = (
+    ("SNES ROMs", "*.sfc *.smc *.fig *.swc *.SFC *.SMC *.FIG *.SWC"),
+    ("All Files", "*.*"),
+)
+
 
 class Cartridge:
     """SNES cartridge (.sfc / .smc): LoROM / HiROM / ExHiROM + dynamic SRAM."""
@@ -151,6 +158,9 @@ class Cartridge:
         self._sram_path = ""
 
     def load(self, path: str) -> None:
+        ext = os.path.splitext(path)[1]
+        if ext and ext not in _ROM_EXTENSIONS:
+            log.info("loading non-standard extension %s (still accepted)", ext)
         with open(path, "rb") as fh:
             data = bytearray(fh.read())
         if not data:
@@ -3369,7 +3379,7 @@ class AudioOutput:
 
 # ── cat's snes9x 1.1 GUI ────────────────────────────────────────────────────
 class CatsSnes9x:
-    """SNES9x-like shell: blue bg, blue text, black buttons. files=OFF default."""
+    """SNES9x-like shell: blue bg, blue text, black buttons. files=ON default."""
 
     # B Y Select Start Up Down Left Right A X L R
     KEYMAP = {
@@ -3382,7 +3392,7 @@ class CatsSnes9x:
         self,
         rom_path: str | None = None,
         *,
-        files_off: bool = True,
+        files_off: bool = False,
         enable_sound: bool = True,
         menustrip_on: bool = True,
     ) -> None:
@@ -3399,7 +3409,7 @@ class CatsSnes9x:
         self.held: set[str] = set()
         self.image: tk.PhotoImage | None = None
         self.scaled: tk.PhotoImage | None = None
-        self.files_off = True  # forced OFF — Load ROM UI locked
+        self.files_off = bool(files_off)
         self.menustrip_on = bool(menustrip_on)
         self.fullscreen = False
         self._perf_started = time.perf_counter()
@@ -3417,7 +3427,8 @@ class CatsSnes9x:
         self.title_label: tk.Label | None = None
         self.hint_label: tk.Label | None = None
         self.mute_text = tk.StringVar(value="MUTE")
-        self.status_var = tk.StringVar(value=self._base_status + "  ·  files=OFF")
+        mode = "files=OFF" if self.files_off else "files=ON"
+        self.status_var = tk.StringVar(value=self._base_status + f"  ·  {mode}")
 
         self._rebuild_menu()
         self._make_chrome()
@@ -3428,6 +3439,7 @@ class CatsSnes9x:
         self.root.bind("<KeyRelease>", self.key_up)
         self.root.focus_set()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._setup_file_drop()
         self._draw_boot()
         self.root.after(1, self.loop)
         if rom_path:
@@ -3494,8 +3506,7 @@ class CatsSnes9x:
 
         _, file_menu = self._vb6_menubutton(strip, "File", 0)
         file_menu.add_command(
-            label="Load ROM...", accelerator="Ctrl+O",
-            command=self.open_rom, state="disabled",
+            label="Load ROM...", accelerator="Ctrl+O", command=self.open_rom,
         )
         recent = tk.Menu(file_menu, tearoff=False, bg=face, fg="#000",
                          activebackground="#0A246A", activeforeground="#FFF", font=("Tahoma", 9))
@@ -3522,6 +3533,9 @@ class CatsSnes9x:
 
         _, cfg = self._vb6_menubutton(strip, "Config", 0)
         cfg.add_command(label="Mute / Unmute", command=self.toggle_mute)
+        cfg.add_separator()
+        cfg.add_command(label="files = ON", command=lambda: self.set_files_mode(False))
+        cfg.add_command(label="files = OFF", command=lambda: self.set_files_mode(True))
 
         _, help_m = self._vb6_menubutton(strip, "Help", 0)
         help_m.add_command(label="Controls", command=self.show_controls)
@@ -3559,11 +3573,11 @@ class CatsSnes9x:
                     "<Control-l>", "<Command-l>", "<Control-f>", "<Command-f>",
                     "<F7>", "<F8>", "<F11>", "<F12>"):
             self.root.unbind(seq)
-        # files=OFF: Ctrl+O shows notice instead of opening a picker
-        self.root.bind("<Control-o>", lambda _e: self._files_off_notice())
-        self.root.bind("<Command-o>", lambda _e: self._files_off_notice())
-        self.root.bind("<Control-f>", lambda _e: self._files_off_notice())
-        self.root.bind("<Command-f>", lambda _e: self._files_off_notice())
+        # files=ON: Ctrl+O opens native picker; Ctrl+F toggles files mode
+        self.root.bind("<Control-o>", lambda _e: self.open_rom())
+        self.root.bind("<Command-o>", lambda _e: self.open_rom())
+        self.root.bind("<Control-f>", lambda _e: self.toggle_files())
+        self.root.bind("<Command-f>", lambda _e: self.toggle_files())
         self.root.bind("<Control-r>", lambda _e: self.reset())
         self.root.bind("<Command-r>", lambda _e: self.reset())
         self.root.bind("<Control-q>", lambda _e: self.close())
@@ -3581,7 +3595,9 @@ class CatsSnes9x:
         if self.file_menu is None:
             return
         try:
-            self.file_menu.entryconfig("Load ROM...", state="disabled")
+            self.file_menu.entryconfig(
+                "Load ROM...", state="disabled" if self.files_off else "normal",
+            )
         except tk.TclError:
             pass
 
@@ -3589,51 +3605,101 @@ class CatsSnes9x:
         if self.recent_menu is None:
             return
         self.recent_menu.delete(0, "end")
-        self.recent_menu.add_command(label="(files=OFF)", command=self._files_off_notice)
+        if self.files_off:
+            self.recent_menu.add_command(label="(files=OFF)", command=self._files_off_notice)
+        elif not self.recent:
+            self.recent_menu.add_command(label="(empty)", state="disabled")
+        else:
+            for p in self.recent:
+                self.recent_menu.add_command(
+                    label=os.path.basename(p), command=lambda path=p: self.load_rom(path),
+                )
 
     def set_files_mode(self, files_off: bool) -> None:
-        # files stays OFF in this build
-        self.files_off = True
+        self.files_off = bool(files_off)
         self._apply_files_mode_ui()
         self._sync_load_state()
         self._refresh_recent()
         self.status_var.set(
-            f"files=OFF  ·  audio={'ON' if self.audio.available else 'off'}  ·  "
+            f"{'files=OFF' if self.files_off else 'files=ON'}  ·  "
+            f"audio={'ON' if self.audio.available else 'off'}  ·  "
             f"{CORE_LABEL}  ·  opcodes={CPU65816.OPCODE_COUNT}/256"
         )
 
     def toggle_files(self) -> None:
-        self._files_off_notice()
+        self.set_files_mode(not self.files_off)
 
     def _apply_files_mode_ui(self) -> None:
+        mode = "files=OFF" if self.files_off else "files=ON"
         if self.title_label is not None:
             self.title_label.config(
-                text=f"  {APP_NAME}  {APP_VERSION}   ·   {CORE_LABEL}   ·   files=OFF  ",
+                text=f"  {APP_NAME}  {APP_VERSION}   ·   {CORE_LABEL}   ·   {mode}  ",
             )
         if self.hint_label is not None:
             self.hint_label.config(
-                text="  files=OFF · Load ROM locked · pass ROM on CLI · Z/A/X/S · arrows",
+                text=("  files=OFF · Load ROM locked · Ctrl+F" if self.files_off
+                      else "  files=ON · File→Load ROM (.sfc/.smc/.fig/.swc) · Z/A/X/S"),
             )
         if self.load_btn is not None:
-            self.load_btn.config(state="disabled", text="Load ROM (OFF)")
+            if self.files_off:
+                self.load_btn.config(state="disabled", text="Load ROM (OFF)")
+            else:
+                self.load_btn.config(state="normal", text="Load ROM...")
 
     def open_rom(self) -> None:
-        self._files_off_notice()
+        if self.files_off:
+            self._files_off_notice()
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title=f"Load ROM — {APP_NAME}",
+            filetypes=_ROM_FILETYPES,
+        )
+        if path:
+            self.load_rom(path)
 
     def _files_off_notice(self) -> None:
         self._dialog(
             f"{APP_NAME} — files=OFF",
-            "Load ROM is locked (files=OFF).\n"
-            "Pass a ROM path on the command line:\n"
-            "  python3 snesemu0.1.1.py game.sfc\n\n"
-            f"Inlined snes9x core: {CORE_BACKEND}\n"
-            f"65C816 opcodes: {CPU65816.OPCODE_COUNT}/256",
+            "Load ROM locked.\nConfig → files = ON, Ctrl+F, or --files-on.",
         )
+
+    def _setup_file_drop(self) -> None:
+        """macOS Finder open/drop; optional tkinterdnd2 canvas drop when installed."""
+        try:
+            if self.root.tk.call("tk", "windowingsystem") == "aqua":
+                self.root.createcommand("::tk::mac::OpenDocument", self._on_open_document)
+        except tk.TclError:
+            pass
+        try:
+            from tkinterdnd2 import DND_FILES  # type: ignore
+            self.canvas.drop_target_register(DND_FILES)
+            self.canvas.dnd_bind("<<Drop>>", self._on_canvas_drop)
+        except (ImportError, tk.TclError, AttributeError):
+            pass
+
+    def _on_open_document(self, *paths: str) -> None:
+        if self.files_off:
+            self._files_off_notice()
+            return
+        for path in paths:
+            if path:
+                self.load_rom(str(path))
+                break
+
+    def _on_canvas_drop(self, event) -> None:
+        if self.files_off:
+            self._files_off_notice()
+            return
+        raw = getattr(event, "data", "") or ""
+        path = raw.strip("{}").split()[0] if raw else ""
+        if path:
+            self.load_rom(path)
 
     def _make_chrome(self) -> None:
         self.title_label = tk.Label(
             self.root,
-            text=f"  {APP_NAME}  {APP_VERSION}   ·   {CORE_LABEL}   ·   files=OFF  ",
+            text=f"  {APP_NAME}  {APP_VERSION}   ·   {CORE_LABEL}   ·   files=ON  ",
             bg=BG, fg=FG, font=("Courier", 11, "bold"), anchor="w",
         )
         self.title_label.pack(fill="x", padx=6, pady=(6, 2))
@@ -3647,14 +3713,14 @@ class CatsSnes9x:
 
         bar = tk.Frame(self.root, bg=BG)
         bar.pack(fill="x", padx=8, pady=(0, 4))
-        self.load_btn = self._btn(bar, "Load ROM (OFF)", self.open_rom)
-        self.load_btn.config(state="disabled")
+        self.load_btn = self._btn(bar, "Load ROM...", self.open_rom)
         self.load_btn.pack(side="left")
         self._btn(bar, "RESET", self.reset).pack(side="left", padx=6)
         self._btn(bar, "PAUSE", self.toggle_pause).pack(side="left")
         mute = self._btn(bar, "MUTE", self.toggle_mute)
         mute.config(textvariable=self.mute_text)
         mute.pack(side="left", padx=6)
+        self._btn(bar, "FILES", self.toggle_files).pack(side="left", padx=6)
         self._btn(bar, "STEP", self.frame_advance).pack(side="left")
         self._btn(bar, "DEBUG", self.show_debugger).pack(side="left", padx=6)
         self.hint_label = tk.Label(bar, text="", bg=BG, fg=FG_DIM, font=("Courier", 9))
@@ -3906,7 +3972,8 @@ class CatsSnes9x:
             "D L · C R\n\n"
             f"65816 opcodes: {CPU65816.OPCODE_COUNT}/256 (inlined snes9x jump table)\n"
             "Space pause · F7 CPU step · F8 frame advance · F11 fullscreen · F12 screenshot\n"
-            "files=OFF — Load ROM locked; pass a ROM path on the CLI.",
+            "files=ON · File→Load ROM · Ctrl+O · drop ROM on window (macOS)\n"
+            "Use ROM files you legally own.",
         )
 
     def show_about(self) -> None:
@@ -3918,7 +3985,7 @@ class CatsSnes9x:
             f"Audio: {self.audio.backend}\n"
             f"Opcodes: {CPU65816.OPCODE_COUNT}/256 · jump table ready\n"
             "No external snes9x package — core lives in this file.\n"
-            "files=OFF · blue / black chrome · Python 3.14+\n"
+            "files=ON · Load ROM from disk (.sfc/.smc/.fig/.swc)\n"
             "Use ROMs you legally own.",
         )
 
@@ -4237,7 +4304,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     argv = list(sys.argv[1:] if argv is None else argv)
     rom = None
-    files_off = True  # files=OFF — Load ROM UI locked; CLI ROM path works
+    files_off = False  # files=ON — Load ROM enabled by default
     enable_sound = True
     i = 0
     while i < len(argv):
@@ -4246,7 +4313,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{APP_NAME} {APP_VERSION}  core={CORE_LABEL}")
             print("Usage: python3 snesemu0.1.1.py [options] [game.sfc]")
             print("  --self-test         run mapper/CPU/PPU/DMA/state smoke tests")
-            print("  --files-off         Load ROM locked (default)")
+            print("  --files-on / -F     Load ROM enabled (default)")
+            print("  --files-off         lock the Load ROM controls")
             print("  --sound             audio ON (default)")
             print("  --no-sound          disable audio")
             print(f"  65816 opcodes       {CPU65816.OPCODE_COUNT}/256 (inlined snes9x)")
@@ -4254,8 +4322,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arg == "--self-test":
             return run_self_tests()
-        if arg in ("--files-on", "-F", "--files-off"):
-            files_off = True  # this build keeps files=OFF
+        if arg in ("--files-on", "-F"):
+            files_off = False
+        elif arg == "--files-off":
+            files_off = True
         elif arg in ("--sound", "-S"):
             enable_sound = True
         elif arg == "--no-sound":

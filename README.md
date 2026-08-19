@@ -23,11 +23,28 @@ python3 snesemu0.1.1.py --self-test
 # Run with a ROM you legally own
 python3 snesemu0.1.1.py path/to/your_rom.sfc
 
+# GUI: File → Load ROM, Ctrl+O, or drag/open on macOS
+python3 snesemu0.1.1.py
+
 # Headless-friendly: disable audio
 python3 snesemu0.1.1.py --no-sound path/to/test.sfc
 ```
 
+**Supported extensions:** `.sfc`, `.smc`, `.fig`, `.swc` (512-byte copier headers stripped automatically).
+
 Alternate entry point: `>snesemu.py` (kept in sync with `snesemu0.1.1.py`).
+
+## Loading ROMs (files = ON)
+
+| Method | Action |
+| :--- | :--- |
+| **File menu** | File → Load ROM… |
+| **Keyboard** | Ctrl+O (Cmd+O on macOS) |
+| **Toolbar** | Load ROM… button |
+| **CLI** | `python3 snesemu0.1.1.py your_rom.sfc` |
+| **Recent** | File → Recent |
+| **macOS** | Drag ROM to app window or open via Finder |
+| **Toggle** | Config → files = ON/OFF, Ctrl+F, or `--files-off` |
 
 ## Validation with legal test ROMs
 
